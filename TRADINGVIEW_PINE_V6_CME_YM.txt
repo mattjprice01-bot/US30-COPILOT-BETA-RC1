@@ -1,0 +1,122 @@
+//@version=6
+indicator("US30 LIVE DATA FEED V6 + CME YM", overlay=true, max_labels_count=50, dynamic_requests=true)
+
+// V6 US30 feed + real-time CME/CBOT E-mini Dow (YM) confirmation.
+// Run this on the exact US30/Dow instrument you trade, on a 1-minute chart.
+// Requires TradingView CME Group real-time market data for CBOT_MINI:YM1!.
+// Create ONE alert:
+// Condition -> US30 LIVE DATA FEED V6 + CME YM -> Any alert() function call
+// Webhook -> https://YOUR-RAILWAY-DOMAIN/webhook/tradingview
+
+sendFeed = input.bool(true, "Send V6 snapshot each confirmed 1m bar")
+showPanel = input.bool(true, "Show status panel")
+ymSymbol = input.symbol("CBOT_MINI:YM1!", "YM futures confirmation symbol")
+
+f_num(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+f_num2(float x) => na(x) ? "null" : str.tostring(x, "#.##")
+
+// Previous CONFIRMED bar of whichever timeframe request.security() is evaluating.
+// Used for all higher-timeframe snapshots to avoid feeding a still-forming HTF bar.
+f_prev_snapshot() =>
+    float e20 = ta.ema(close, 20)
+    float e50 = ta.ema(close, 50)
+    float e200 = ta.ema(close, 200)
+    float rv = ta.rsi(close, 14)
+    float av = ta.atr(14)
+    float vw = ta.vwap(hlc3)
+    float sh = ta.highest(high[1], 20)
+    float sl = ta.lowest(low[1], 20)
+    float vm = ta.sma(volume, 20)
+    [open[1], high[1], low[1], close[1], e20[1], e50[1], e200[1], rv[1], av[1], vw[1], sh[1], sl[1], close[4], open[2], close[2], volume[1], vm[1]]
+
+// Current 1-minute snapshot. The alert itself only fires after the chart's 1m bar closes.
+f_current_snapshot() =>
+    float e20 = ta.ema(close, 20)
+    float e50 = ta.ema(close, 50)
+    float e200 = ta.ema(close, 200)
+    float rv = ta.rsi(close, 14)
+    float av = ta.atr(14)
+    float vw = ta.vwap(hlc3)
+    float sh = ta.highest(high[1], 20)
+    float sl = ta.lowest(low[1], 20)
+    float vm = ta.sma(volume, 20)
+    [open, high, low, close, e20, e50, e200, rv, av, vw, sh, sl, close[3], open[1], close[1], volume, vm]
+
+f_json(string tf, float o, float h, float l, float c, float e20, float e50, float e200, float rv, float av, float vw, float sh, float sl, float c3, float po, float pc, float vol, float vma20) =>
+    '{"tf":"' + tf + '","o":' + f_num(o) + ',"h":' + f_num(h) + ',"l":' + f_num(l) + ',"c":' + f_num(c) + ',"ema20":' + f_num(e20) + ',"ema50":' + f_num(e50) + ',"ema200":' + f_num(e200) + ',"rsi":' + f_num2(rv) + ',"atr":' + f_num(av) + ',"vwap":' + f_num(vw) + ',"swing_hi":' + f_num(sh) + ',"swing_lo":' + f_num(sl) + ',"c3":' + f_num(c3) + ',"prev_o":' + f_num(po) + ',"prev_c":' + f_num(pc) + ',"vol":' + f_num(vol) + ',"vma20":' + f_num(vma20) + '}'
+
+// The backend's YM scorer only needs these fields.
+f_ym_json(string tf, float c, float e20, float e50, float rv, float av, float c3, float vol, float vma20) =>
+    '{"tf":"' + tf + '","c":' + f_num(c) + ',"ema20":' + f_num(e20) + ',"ema50":' + f_num(e50) + ',"rsi":' + f_num2(rv) + ',"atr":' + f_num(av) + ',"c3":' + f_num(c3) + ',"vol":' + f_num(vol) + ',"vma20":' + f_num(vma20) + '}'
+
+// -----------------------------------------------------------------------------
+// PRIMARY US30 DATA
+// -----------------------------------------------------------------------------
+e20_1 = ta.ema(close,20)
+e50_1 = ta.ema(close,50)
+e200_1 = ta.ema(close,200)
+rsi_1 = ta.rsi(close,14)
+atr_1 = ta.atr(14)
+vwap_1 = ta.vwap(hlc3)
+shi_1 = ta.highest(high[1],20)
+slo_1 = ta.lowest(low[1],20)
+vma_1 = ta.sma(volume,20)
+
+[o5,h5,l5,c5,e205,e505,e2005,r5,a5,v5,sh5,sl5,c35,po5,pc5,vol5,vm5] = request.security(syminfo.tickerid,"5",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[o15,h15,l15,c15,e2015,e5015,e20015,r15,a15,v15,sh15,sl15,c315,po15,pc15,vol15,vm15] = request.security(syminfo.tickerid,"15",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[o30,h30,l30,c30,e2030,e5030,e20030,r30,a30,v30,sh30,sl30,c330,po30,pc30,vol30,vm30] = request.security(syminfo.tickerid,"30",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[o60,h60,l60,c60,e2060,e5060,e20060,r60,a60,v60,sh60,sl60,c360,po60,pc60,vol60,vm60] = request.security(syminfo.tickerid,"60",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[o240,h240,l240,c240,e20240,e50240,e200240,r240,a240,v240,sh240,sl240,c3240,po240,pc240,vol240,vm240] = request.security(syminfo.tickerid,"240",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[oD,hD,lD,cD,e20D,e50D,e200D,rD,aD,vD,shD,slD,c3D,poD,pcD,volD,vmD] = request.security(syminfo.tickerid,"1D",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[oW,hW,lW,cW,e20W,e50W,e200W,rW,aW,vW,shW,slW,c3W,poW,pcW,volW,vmW] = request.security(syminfo.tickerid,"1W",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+
+j1=f_json("1m",open,high,low,close,e20_1,e50_1,e200_1,rsi_1,atr_1,vwap_1,shi_1,slo_1,close[3],open[1],close[1],volume,vma_1)
+j5=f_json("5m",o5,h5,l5,c5,e205,e505,e2005,r5,a5,v5,sh5,sl5,c35,po5,pc5,vol5,vm5)
+j15=f_json("15m",o15,h15,l15,c15,e2015,e5015,e20015,r15,a15,v15,sh15,sl15,c315,po15,pc15,vol15,vm15)
+j30=f_json("30m",o30,h30,l30,c30,e2030,e5030,e20030,r30,a30,v30,sh30,sl30,c330,po30,pc30,vol30,vm30)
+j60=f_json("1h",o60,h60,l60,c60,e2060,e5060,e20060,r60,a60,v60,sh60,sl60,c360,po60,pc60,vol60,vm60)
+j240=f_json("4h",o240,h240,l240,c240,e20240,e50240,e200240,r240,a240,v240,sh240,sl240,c3240,po240,pc240,vol240,vm240)
+jD=f_json("1d",oD,hD,lD,cD,e20D,e50D,e200D,rD,aD,vD,shD,slD,c3D,poD,pcD,volD,vmD)
+jW=f_json("1w",oW,hW,lW,cW,e20W,e50W,e200W,rW,aW,vW,shW,slW,c3W,poW,pcW,volW,vmW)
+
+// -----------------------------------------------------------------------------
+// CME/CBOT YM FUTURES CONFIRMATION
+// -----------------------------------------------------------------------------
+// Current confirmed 1m YM values.
+[yo1,yh1,yl1,yc1,ye201,ye501,ye2001,yr1,ya1,yvw1,ysh1,ysl1,yc31,ypo1,ypc1,yvol1,yvm1] = request.security(ymSymbol,"1",f_current_snapshot(),lookahead=barmerge.lookahead_off)
+
+// Previous confirmed higher-timeframe YM values.
+[yo5,yh5,yl5,yc5,ye205,ye505,ye2005,yr5,ya5,yvw5,ysh5,ysl5,yc35,ypo5,ypc5,yvol5,yvm5] = request.security(ymSymbol,"5",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[yo15,yh15,yl15,yc15,ye2015,ye5015,ye20015,yr15,ya15,yvw15,ysh15,ysl15,yc315,ypo15,ypc15,yvol15,yvm15] = request.security(ymSymbol,"15",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[yo30,yh30,yl30,yc30,ye2030,ye5030,ye20030,yr30,ya30,yvw30,ysh30,ysl30,yc330,ypo30,ypc30,yvol30,yvm30] = request.security(ymSymbol,"30",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[yo60,yh60,yl60,yc60,ye2060,ye5060,ye20060,yr60,ya60,yvw60,ysh60,ysl60,yc360,ypo60,ypc60,yvol60,yvm60] = request.security(ymSymbol,"60",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[yo240,yh240,yl240,yc240,ye20240,ye50240,ye200240,yr240,ya240,yvw240,ysh240,ysl240,yc3240,ypo240,ypc240,yvol240,yvm240] = request.security(ymSymbol,"240",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[yoD,yhD,ylD,ycD,ye20D,ye50D,ye200D,yrD,yaD,yvwD,yshD,yslD,yc3D,ypoD,ypcD,yvolD,yvmD] = request.security(ymSymbol,"1D",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+[yoW,yhW,ylW,ycW,ye20W,ye50W,ye200W,yrW,yaW,yvwW,yshW,yslW,yc3W,ypoW,ypcW,yvolW,yvmW] = request.security(ymSymbol,"1W",f_prev_snapshot(),lookahead=barmerge.lookahead_on)
+
+yj1=f_ym_json("1m",yc1,ye201,ye501,yr1,ya1,yc31,yvol1,yvm1)
+yj5=f_ym_json("5m",yc5,ye205,ye505,yr5,ya5,yc35,yvol5,yvm5)
+yj15=f_ym_json("15m",yc15,ye2015,ye5015,yr15,ya15,yc315,yvol15,yvm15)
+yj30=f_ym_json("30m",yc30,ye2030,ye5030,yr30,ya30,yc330,yvol30,yvm30)
+yj60=f_ym_json("1h",yc60,ye2060,ye5060,yr60,ya60,yc360,yvol60,yvm60)
+yj240=f_ym_json("4h",yc240,ye20240,ye50240,yr240,ya240,yc3240,yvol240,yvm240)
+yjD=f_ym_json("1d",ycD,ye20D,ye50D,yrD,yaD,yc3D,yvolD,yvmD)
+yjW=f_ym_json("1w",ycW,ye20W,ye50W,yrW,yaW,yc3W,yvolW,yvmW)
+
+payload='{"version":6,"symbol":"'+syminfo.tickerid+'","exchange":"'+syminfo.prefix+'","ts":'+str.tostring(time_close)+',"frames":['+j1+','+j5+','+j15+','+j30+','+j60+','+j240+','+jD+','+jW+'],"futures":{"symbol":"'+ymSymbol+'","frames":['+yj1+','+yj5+','+yj15+','+yj30+','+yj60+','+yj240+','+yjD+','+yjW+']}}'
+
+isOneMinute=timeframe.isminutes and timeframe.multiplier==1
+if sendFeed and isOneMinute and barstate.isconfirmed
+    alert(payload,alert.freq_once_per_bar_close)
+
+plot(e20_1,"EMA 20",color=color.new(color.aqua,0))
+plot(e50_1,"EMA 50",color=color.new(color.orange,0))
+plot(e200_1,"EMA 200",color=color.new(color.gray,15))
+plot(vwap_1,"VWAP",color=color.new(color.purple,0))
+
+var table t=table.new(position.top_right,1,4,border_width=1)
+if showPanel and barstate.islast
+    table.cell(t,0,0,"US30 Signal Lab V6 + CME YM",text_color=color.white,bgcolor=color.rgb(20,28,42))
+    table.cell(t,0,1,isOneMinute?"Feed: 1m confirmed":"Switch chart to 1 minute",text_color=isOneMinute?color.lime:color.orange)
+    table.cell(t,0,2,"YM: "+ymSymbol+" · CME confirmation ON",text_color=color.lime)
+    table.cell(t,0,3,"Alert: Any alert() function call",text_color=color.silver)
