@@ -853,7 +853,7 @@ def performance(session: str | None = Cookie(default=None)):
 
 @app.get("/promo.png")
 def promo():
-    return FileResponse(BASE/"assets"/"US30_COPILOT_PROMO.png", media_type="image/png")
+    return FileResponse(BASE/"US30_COPILOT_PROMO.png", media_type="image/png")
 
 @app.get("/downloads/tradingview-pine")
 def download_tradingview_pine(feed: str = "standard"):
