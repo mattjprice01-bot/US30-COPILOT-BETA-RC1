@@ -57,6 +57,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 RESET_EMAIL_FROM = os.getenv("RESET_EMAIL_FROM", "onboarding@resend.dev").strip()
 PASSWORD_RESET_MINUTES = max(10, int(os.getenv("PASSWORD_RESET_MINUTES", "30")))
+FORGELOGIC_BRIDGE_SECRET = os.getenv("FORGELOGIC_BRIDGE_SECRET", "").strip()
 stripe.api_key = STRIPE_SECRET_KEY or None
 
 # Commercial safety invariant: never run a Stripe-enabled deployment with the
@@ -1057,6 +1058,10 @@ class RegisterBody(BaseModel):
     password: str
     display_name: str = ""
 
+class ForgeLogicInviteBody(BaseModel):
+    email: EmailStr
+    display_name: str = ""
+
 class LoginBody(BaseModel):
     email: EmailStr
     password: str
@@ -1144,6 +1149,139 @@ def health():
     # Public liveness endpoint: intentionally avoid exposing infrastructure,
     # integration configuration, customer counts or secret-configuration state.
     return {"ok": True, "service": APP_TITLE, "build_id": BUILD_ID}
+
+
+@app.post("/internal/forgelogic/invite")
+def forgelogic_invite(body: ForgeLogicInviteBody, request: Request):
+    """
+    Private server-to-server bridge used by ForgeLogic Beta Admin.
+
+    Creates the same commercial BETA account shape as /auth/register:
+    user + private TradingView token + inactive BETA subscription row +
+    default user settings. The customer is then sent a one-time password
+    setup link using the existing password-reset flow.
+
+    This route must never be called from browser JavaScript.
+    """
+    if not FORGELOGIC_BRIDGE_SECRET:
+        raise HTTPException(503, "ForgeLogic bridge is not configured")
+
+    supplied = (request.headers.get("x-forgelogic-bridge-secret") or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, FORGELOGIC_BRIDGE_SECRET):
+        raise HTTPException(401, "Unauthorized")
+
+    email = body.email.lower().strip()
+    display_name = (body.display_name or "").strip() or email.split("@", 1)[0]
+
+    with db() as con:
+        existing = con.execute(
+            "SELECT * FROM users WHERE email=?",
+            (email,),
+        ).fetchone()
+
+        if existing:
+            uid = int(existing["id"])
+            if not int(existing["is_active"]):
+                raise HTTPException(409, "Existing account is inactive")
+            user = dict(existing)
+
+            # Ensure old/existing BETA records still have the commercial rows
+            # required by the current RC1 build. Never downgrade ALPHA.
+            c = con.execute(
+                "SELECT user_id FROM user_connections WHERE user_id=?",
+                (uid,),
+            ).fetchone()
+            if not c:
+                con.execute(
+                    "INSERT INTO user_connections(user_id,tradingview_token,created_at,updated_at) VALUES(?,?,?,?)",
+                    (uid, secrets.token_hex(24), now_iso(), now_iso()),
+                )
+            if str(user.get("plan") or "").upper() != "ALPHA":
+                con.execute("UPDATE users SET plan='BETA' WHERE id=?", (uid,))
+                _upsert_subscription(con, uid, plan="BETA", status="inactive")
+            con.commit()
+            created = False
+        else:
+            # Temporary random credential is never shown to the applicant.
+            # The password-setup link below replaces it before first use.
+            temp_password = secrets.token_urlsafe(48)
+            salt = os.urandom(16)
+            try:
+                cur = con.execute(
+                    """INSERT INTO users(email,password_hash,password_salt,display_name,created_at,plan)
+                       VALUES(?,?,?,?,?,?) RETURNING id""",
+                    (
+                        email,
+                        _pwd_hash(temp_password, salt),
+                        salt.hex(),
+                        display_name,
+                        now_iso(),
+                        "BETA",
+                    ),
+                )
+            except (sqlite3.IntegrityError, UniqueViolation):
+                raise HTTPException(409, "Email already registered")
+
+            uid = int(cur.fetchone()["id"])
+            con.execute(
+                "INSERT INTO user_connections(user_id,tradingview_token,created_at,updated_at) VALUES(?,?,?,?)",
+                (uid, secrets.token_hex(24), now_iso(), now_iso()),
+            )
+            _upsert_subscription(con, uid, plan="BETA", status="inactive")
+            for k, v in DEFAULT_SETTINGS.items():
+                con.execute(
+                    "INSERT INTO user_settings(user_id,k,v) VALUES(?,?,?)",
+                    (uid, k, json.dumps(v)),
+                )
+            con.commit()
+            user = dict(con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+            created = True
+
+        # Invalidate any prior unused setup/reset links and issue a fresh one.
+        con.execute(
+            "UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL",
+            (now_iso(), uid),
+        )
+        raw_token = secrets.token_urlsafe(48)
+        expires = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_MINUTES)
+        con.execute(
+            """INSERT INTO password_reset_tokens(token_hash,user_id,created_at,expires_at,used_at)
+               VALUES(?,?,?,?,NULL)""",
+            (_reset_token_hash(raw_token), uid, now_iso(), expires.isoformat()),
+        )
+        con.commit()
+
+    base = PUBLIC_URL or str(request.base_url).rstrip("/")
+    reset_url = f"{base}/?reset_token={raw_token}"
+
+    delivery = "not_configured"
+    try:
+        _send_password_reset_email(email, reset_url)
+        delivery = "accepted"
+    except Exception as exc:
+        # Account creation must remain idempotent even if email delivery fails.
+        # ForgeLogic Admin will receive the delivery state and can retry.
+        print(
+            f"[FORGELOGIC-INVITE-EMAIL-ERROR] uid={uid} {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        delivery = "failed"
+
+    print(
+        f"[FORGELOGIC-INVITE] uid={uid} created={created} delivery={delivery} "
+        f"email_domain={email.rsplit('@',1)[-1] if '@' in email else 'unknown'}",
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "created": created,
+        "user_id": uid,
+        "email": email,
+        "plan": str(user.get("plan") or "BETA").upper(),
+        "setup_email": delivery,
+    }
+
 
 @app.post("/auth/register")
 def register(body: RegisterBody):
