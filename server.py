@@ -33,9 +33,10 @@ from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 import stripe
-
+from thesis_identity import market_thesis_id
 from market_context import EconomicCalendar
 from scoring import STRATEGIES, aggregate, get_strategy
+
 from databento_live import DatabentoOrderflowManager
 
 BASE = Path(__file__).resolve().parent
@@ -198,6 +199,8 @@ def _shutdown_databento() -> None:
     for mgr in managers:
         mgr.stop()
 
+COMMERCIAL_STRATEGIES = ("scalp", "intraday")
+
 DEFAULT_SETTINGS = {
     "strategy": "scalp",
     "browser_notifications": True,
@@ -263,6 +266,11 @@ CREATE TABLE IF NOT EXISTS user_subscriptions(
   created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS stripe_events(
   event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,created_at TEXT NOT NULL,processed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS thesis_shadow_events(
+  id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,created_at TEXT NOT NULL,session_id BIGINT,thesis_id TEXT,
+  strategy TEXT NOT NULL,side TEXT,event_type TEXT NOT NULL,signal TEXT,confidence INTEGER,
+  weighted_score DOUBLE PRECISION,price DOUBLE PRECISION,details_json TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS idx_thesis_shadow_user_created ON thesis_shadow_events(user_id,created_at);
 """
 
 class PGCompatConnection:
@@ -358,6 +366,7 @@ def _ensure_pg_schema(con) -> None:
         con.execute("ALTER TABLE users ALTER COLUMN plan SET DEFAULT 'BETA'")
         con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS copilot_session_id BIGINT")
         con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realised_r DOUBLE PRECISION")
+        con.execute("ALTER TABLE thesis_shadow_events ADD COLUMN IF NOT EXISTS thesis_id TEXT")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_session_unique ON trades(copilot_session_id) WHERE copilot_session_id IS NOT NULL")
         con.commit()
         _migrate_sqlite_to_postgres_if_needed(con)
@@ -382,6 +391,11 @@ def db():
     CREATE TABLE IF NOT EXISTS auth_sessions(
       token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS thesis_shadow_events(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,session_id INTEGER,thesis_id TEXT,
+      strategy TEXT NOT NULL,side TEXT,event_type TEXT NOT NULL,signal TEXT,confidence INTEGER,
+      weighted_score REAL,price REAL,details_json TEXT NOT NULL DEFAULT '{}');
+    CREATE INDEX IF NOT EXISTS idx_thesis_shadow_user_created ON thesis_shadow_events(user_id,created_at);
     CREATE TABLE IF NOT EXISTS password_reset_tokens(
       token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,used_at TEXT,
       FOREIGN KEY(user_id) REFERENCES users(id));
@@ -959,6 +973,26 @@ def _advance_open_validation_trades(con: Any, user_id: int, bar: dict[str, Any],
     for row in rows:
         _advance_validation_trade(con, dict(row), bar, px)
 
+def _market_thesis_id(result: dict[str, Any]) -> str | None:
+    return market_thesis_id(result)
+
+
+
+def _thesis_shadow_event(con: Any, user_id: int, session_id: int | None, result: dict[str, Any], event_type: str, details: dict[str, Any] | None = None) -> None:
+    """Persist RC1.1 thesis-lifecycle telemetry without changing live execution."""
+    thesis_id = _market_thesis_id(result)
+    con.execute(
+        """INSERT INTO thesis_shadow_events(
+               user_id,created_at,session_id,thesis_id,strategy,side,event_type,signal,confidence,weighted_score,price,details_json
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            user_id, now_iso(), session_id, thesis_id,
+            str(result.get("strategy") or "scalp"), result.get("signal"),
+            event_type, result.get("signal"), int(result.get("confidence") or 0),
+            float(result.get("weighted_score") or 0), float(result.get("price") or 0),
+            json.dumps({**(details or {}), "thesis_id": thesis_id}),
+        ),
+    )
 
 def _ensure_continuous_validation_session(con: Any, user_id: int, result: dict[str, Any]) -> dict[str, Any]:
     """Keep autonomous engine validation scanning, independent of manual controls."""
@@ -973,6 +1007,16 @@ def _ensure_continuous_validation_session(con: Any, user_id: int, result: dict[s
             (sess["id"],),
         ).fetchone()
         if tracked and tracked["status"] == "CLOSED":
+            trade_outcome = con.execute(
+                "SELECT close_reason,realised_r FROM trades WHERE copilot_session_id=? ORDER BY id DESC LIMIT 1",
+                (sess["id"],),
+            ).fetchone()
+            if trade_outcome and trade_outcome["close_reason"] == "STOP":
+                _thesis_shadow_event(
+                    con, user_id, int(sess["id"]), result, "INVALIDATED",
+                    {"reason": "validation_stop", "realised_r": trade_outcome["realised_r"],
+                     "previous_side": sess.get("side"), "mode": "shadow_only"},
+                )
             con.execute(
                 "UPDATE copilot_sessions SET status='CLOSED',updated_at=?,closed_at=?,close_reason='VALIDATION_COMPLETE' WHERE id=?",
                 (now, now, sess["id"]),
@@ -1011,6 +1055,22 @@ def _process_copilot(con: Any, user_id: int, payload: dict[str, Any], result: di
     cfg = get_strategy(result.get("strategy"))
     ts_bucket = int(result.get("ts") or 0) // 60000
     if sess["status"] == "LOOKING" and assess["quality"] in ("READY", "NEAR") and result.get("signal") in ("LONG", "SHORT"):
+        previous_stop = con.execute(
+            """SELECT cs.side,cs.closed_at,cs.setup_confidence,cs.setup_score
+               FROM copilot_sessions cs
+               JOIN trades t ON t.copilot_session_id=cs.id
+               WHERE cs.user_id=? AND cs.id<>? AND cs.close_reason='VALIDATION_COMPLETE'
+                 AND cs.side=? AND t.close_reason='STOP'
+               ORDER BY cs.id DESC LIMIT 1""",
+            (user_id, sess["id"], result.get("signal")),
+        ).fetchone()
+        if previous_stop:
+            _thesis_shadow_event(
+                con, user_id, int(sess["id"]), result, "RESETTING",
+                {"reason": "same_direction_requalification_candidate",
+                 "previous_side": previous_stop["side"],
+                 "readiness": assess["score"], "mode": "shadow_only"},
+            )
         _notify(con, user_id, "SETUP", f"{cfg.label} opportunity detected", f"{result['signal']} · readiness {assess['score']}/100 · engine score {result['confidence']}%", f"setup:{sess['id']}:{result['signal']}:{int(result['confidence'])//5}")
         if _settings(user_id, con).get("auto_arm", True) and assess["score"] >= 72:
             con.execute("""UPDATE copilot_sessions SET status='ARMED',updated_at=?,strategy=?,symbol=?,side=?,planned_entry_low=?,planned_entry_high=?,stop=?,tp1=?,tp2=?,setup_confidence=?,setup_score=? WHERE id=?""",
@@ -1024,6 +1084,11 @@ def _process_copilot(con: Any, user_id: int, payload: dict[str, Any], result: di
             f"ready:{sess['id']}:{ts_bucket}"
         )
         # Automatic ENGINE validation starts here. Manual live tracking does not.
+        _thesis_shadow_event(
+            con, user_id, int(sess["id"]), result, "REQUALIFIED",
+            {"reason": "current_rc1_entry_ready", "readiness": assess["score"],
+             "inside_entry": assess["inside_entry"], "mode": "shadow_only"},
+        )
         _ensure_validation_trade(con, user_id, sess, result, px)
     if sess["status"] != "LIVE":
         return
@@ -1590,14 +1655,51 @@ def save_connections(body: ConnectionsBody, session: str | None = Cookie(default
 @app.get("/api/settings")
 def get_settings(session: str | None = Cookie(default=None)):
     u = require_user(session)
-    return {"ok":True,"settings":_settings(u["id"]),"strategies":{k:{"label":v.label,"horizon":v.horizon} for k,v in STRATEGIES.items()}}
+    settings = _settings(u["id"])
+    if settings.get("strategy") not in COMMERCIAL_STRATEGIES:
+        settings["strategy"] = "scalp"
+    return {
+        "ok": True,
+        "settings": settings,
+        "strategies": {
+            k: {"label": STRATEGIES[k].label, "horizon": STRATEGIES[k].horizon}
+            for k in COMMERCIAL_STRATEGIES
+        },
+    }
 
 @app.post("/api/settings")
 def set_settings(body: SettingsBody, session: str | None = Cookie(default=None)):
     u = require_user(session)
     vals = {k:v for k,v in body.model_dump().items() if v is not None}
+    if "strategy" in vals:
+        strategy = str(vals["strategy"]).lower()
+        if strategy not in COMMERCIAL_STRATEGIES:
+            raise HTTPException(422, "Commercial RC1.1 supports Scalp and Intraday only")
+        vals["strategy"] = strategy
     return {"ok":True,"settings":_save_settings(u["id"], vals)}
+@app.post("/internal/shadow/tradingview")
+async def shadow_tradingview_ingest(request: Request):
+    expected = os.getenv("SHADOW_MIRROR_SECRET", "").strip()
+    supplied = request.headers.get("X-Shadow-Mirror-Secret", "").strip()
 
+    if not expected or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(403, "Invalid shadow mirror credentials")
+
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "Shadow packet must be valid JSON") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("frames"), list):
+        raise HTTPException(422, "Expected object containing frames[]")
+
+    print(
+        f"[SHADOW-MIRROR-HIT] symbol={payload.get('symbol', 'US30')} "
+        f"ts={payload.get('ts', 0)} frames={len(payload.get('frames') or [])}",
+        flush=True,
+    )
+
+    return {"ok": True, "shadow": True}
 async def _ingest_tradingview_for_user(uid: int, request: Request):
     try:
         require_entitled_user_id(uid)
@@ -1611,6 +1713,8 @@ async def _ingest_tradingview_for_user(uid: int, request: Request):
     if not isinstance(payload, dict) or not isinstance(payload.get("frames"), list):
         raise HTTPException(422, "Expected object containing frames[]")
     settings = _settings(uid)
+    if settings.get("strategy") not in COMMERCIAL_STRATEGIES:
+        settings["strategy"] = "scalp"
     cal = _calendar_for_user(uid)
     news = await cal.context(settings["strategy"])
     result = aggregate(payload, strategy=settings["strategy"], news_ctx=news, orderflow_ctx=_fresh_orderflow(uid), manual_news_block=False)
