@@ -1611,7 +1611,7 @@ async def _ingest_tradingview_for_user(uid: int, request: Request):
         raise HTTPException(400, "Webhook body must be valid JSON") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("frames"), list):
         raise HTTPException(422, "Expected object containing frames[]")
-           mirror_packet(payload) 
+           mirror_packet(payload)   
     settings = _settings(uid)
     cal = _calendar_for_user(uid)
     news = await cal.context(settings["strategy"])
