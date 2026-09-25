@@ -15,7 +15,7 @@ def _result(*, ts, side="LONG", entry_low=52434.8, entry_high=52438.0, stop=5242
 
 
 def test_same_directional_thesis_survives_time_and_level_drift():
-    first = _result(ts=178? if False else 1800000000000)
+    first = _result(ts=1800000000000)
     later = _result(
         ts=1800000540000,
         entry_low=52233.0,
