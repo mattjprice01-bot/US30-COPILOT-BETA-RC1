@@ -1677,7 +1677,29 @@ def set_settings(body: SettingsBody, session: str | None = Cookie(default=None))
             raise HTTPException(422, "Commercial RC1.1 supports Scalp and Intraday only")
         vals["strategy"] = strategy
     return {"ok":True,"settings":_save_settings(u["id"], vals)}
+@app.post("/internal/shadow/tradingview")
+async def shadow_tradingview_ingest(request: Request):
+    expected = os.getenv("SHADOW_MIRROR_SECRET", "").strip()
+    supplied = request.headers.get("X-Shadow-Mirror-Secret", "").strip()
 
+    if not expected or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(403, "Invalid shadow mirror credentials")
+
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "Shadow packet must be valid JSON") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("frames"), list):
+        raise HTTPException(422, "Expected object containing frames[]")
+
+    print(
+        f"[SHADOW-MIRROR-HIT] symbol={payload.get('symbol', 'US30')} "
+        f"ts={payload.get('ts', 0)} frames={len(payload.get('frames') or [])}",
+        flush=True,
+    )
+
+    return {"ok": True, "shadow": True}
 async def _ingest_tradingview_for_user(uid: int, request: Request):
     try:
         require_entitled_user_id(uid)
