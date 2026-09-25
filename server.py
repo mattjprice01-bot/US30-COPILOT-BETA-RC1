@@ -198,6 +198,8 @@ def _shutdown_databento() -> None:
     for mgr in managers:
         mgr.stop()
 
+COMMERCIAL_STRATEGIES = ("scalp", "intraday")
+
 DEFAULT_SETTINGS = {
     "strategy": "scalp",
     "browser_notifications": True,
@@ -1673,12 +1675,27 @@ def save_connections(body: ConnectionsBody, session: str | None = Cookie(default
 @app.get("/api/settings")
 def get_settings(session: str | None = Cookie(default=None)):
     u = require_user(session)
-    return {"ok":True,"settings":_settings(u["id"]),"strategies":{k:{"label":v.label,"horizon":v.horizon} for k,v in STRATEGIES.items()}}
+    settings = _settings(u["id"])
+    if settings.get("strategy") not in COMMERCIAL_STRATEGIES:
+        settings["strategy"] = "scalp"
+    return {
+        "ok": True,
+        "settings": settings,
+        "strategies": {
+            k: {"label": STRATEGIES[k].label, "horizon": STRATEGIES[k].horizon}
+            for k in COMMERCIAL_STRATEGIES
+        },
+    }
 
 @app.post("/api/settings")
 def set_settings(body: SettingsBody, session: str | None = Cookie(default=None)):
     u = require_user(session)
     vals = {k:v for k,v in body.model_dump().items() if v is not None}
+    if "strategy" in vals:
+        strategy = str(vals["strategy"]).lower()
+        if strategy not in COMMERCIAL_STRATEGIES:
+            raise HTTPException(422, "Commercial RC1.1 supports Scalp and Intraday only")
+        vals["strategy"] = strategy
     return {"ok":True,"settings":_save_settings(u["id"], vals)}
 
 async def _ingest_tradingview_for_user(uid: int, request: Request):
@@ -1694,6 +1711,8 @@ async def _ingest_tradingview_for_user(uid: int, request: Request):
     if not isinstance(payload, dict) or not isinstance(payload.get("frames"), list):
         raise HTTPException(422, "Expected object containing frames[]")
     settings = _settings(uid)
+    if settings.get("strategy") not in COMMERCIAL_STRATEGIES:
+        settings["strategy"] = "scalp"
     cal = _calendar_for_user(uid)
     news = await cal.context(settings["strategy"])
     result = aggregate(payload, strategy=settings["strategy"], news_ctx=news, orderflow_ctx=_fresh_orderflow(uid), manual_news_block=False)
