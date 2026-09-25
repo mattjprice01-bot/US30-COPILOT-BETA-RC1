@@ -33,9 +33,10 @@ from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 import stripe
-
+from thesis_identity import market_thesis_id
 from market_context import EconomicCalendar
 from scoring import STRATEGIES, aggregate, get_strategy
+
 from databento_live import DatabentoOrderflowManager
 
 BASE = Path(__file__).resolve().parent
@@ -972,33 +973,9 @@ def _advance_open_validation_trades(con: Any, user_id: int, bar: dict[str, Any],
     for row in rows:
         _advance_validation_trade(con, dict(row), bar, px)
 
-
 def _market_thesis_id(result: dict[str, Any]) -> str | None:
-    """Stable market-centric ID shared by users seeing the same setup.
+    return market_thesis_id(result)
 
-    Identity intentionally excludes user/session IDs. It buckets the market
-    timestamp to five minutes and fingerprints strategy, symbol, direction and
-    rounded planned levels so duplicate customer validations can be grouped
-    without changing any execution behavior.
-    """
-    side = str(result.get("signal") or "").upper()
-    if side not in ("LONG", "SHORT"):
-        return None
-    ts = int(result.get("ts") or 0)
-    bucket = ts // 300000 if ts > 0 else 0
-    strategy = str(result.get("strategy") or "scalp").lower()
-    symbol = str(result.get("symbol") or "US30").upper()
-    def level(name: str) -> str:
-        v = result.get(name)
-        try:
-            return f"{float(v):.1f}"
-        except (TypeError, ValueError):
-            return "-"
-    canonical = "|".join([
-        strategy, symbol, side, str(bucket),
-        level("entry_low"), level("entry_high"), level("stop"), level("tp2"),
-    ])
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
 
 
 def _thesis_shadow_event(con: Any, user_id: int, session_id: int | None, result: dict[str, Any], event_type: str, details: dict[str, Any] | None = None) -> None:
