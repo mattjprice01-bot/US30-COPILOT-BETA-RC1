@@ -1079,9 +1079,12 @@ def _process_copilot(con: Any, user_id: int, payload: dict[str, Any], result: di
     ts_bucket = int(result.get("ts") or 0) // 60000
     if sess["status"] == "LOOKING" and assess["quality"] in ("READY", "NEAR") and result.get("signal") in ("LONG", "SHORT"):
         previous_stop = con.execute(
-            """SELECT side,closed_at,setup_confidence,setup_score FROM copilot_sessions
-               WHERE user_id=? AND id<>? AND close_reason='VALIDATION_COMPLETE' AND side=?
-               ORDER BY id DESC LIMIT 1""",
+            """SELECT cs.side,cs.closed_at,cs.setup_confidence,cs.setup_score
+               FROM copilot_sessions cs
+               JOIN trades t ON t.copilot_session_id=cs.id
+               WHERE cs.user_id=? AND cs.id<>? AND cs.close_reason='VALIDATION_COMPLETE'
+                 AND cs.side=? AND t.close_reason='STOP'
+               ORDER BY cs.id DESC LIMIT 1""",
             (user_id, sess["id"], result.get("signal")),
         ).fetchone()
         if previous_stop:
