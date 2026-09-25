@@ -264,7 +264,7 @@ CREATE TABLE IF NOT EXISTS user_subscriptions(
 CREATE TABLE IF NOT EXISTS stripe_events(
   event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,created_at TEXT NOT NULL,processed_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS thesis_shadow_events(
-  id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,created_at TEXT NOT NULL,session_id BIGINT,
+  id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,created_at TEXT NOT NULL,session_id BIGINT,thesis_id TEXT,
   strategy TEXT NOT NULL,side TEXT,event_type TEXT NOT NULL,signal TEXT,confidence INTEGER,
   weighted_score DOUBLE PRECISION,price DOUBLE PRECISION,details_json TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS idx_thesis_shadow_user_created ON thesis_shadow_events(user_id,created_at);
@@ -363,6 +363,7 @@ def _ensure_pg_schema(con) -> None:
         con.execute("ALTER TABLE users ALTER COLUMN plan SET DEFAULT 'BETA'")
         con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS copilot_session_id BIGINT")
         con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realised_r DOUBLE PRECISION")
+        con.execute("ALTER TABLE thesis_shadow_events ADD COLUMN IF NOT EXISTS thesis_id TEXT")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_session_unique ON trades(copilot_session_id) WHERE copilot_session_id IS NOT NULL")
         con.commit()
         _migrate_sqlite_to_postgres_if_needed(con)
@@ -388,7 +389,7 @@ def db():
       token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS thesis_shadow_events(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,session_id INTEGER,
+      id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,session_id INTEGER,thesis_id TEXT,
       strategy TEXT NOT NULL,side TEXT,event_type TEXT NOT NULL,signal TEXT,confidence INTEGER,
       weighted_score REAL,price REAL,details_json TEXT NOT NULL DEFAULT '{}');
     CREATE INDEX IF NOT EXISTS idx_thesis_shadow_user_created ON thesis_shadow_events(user_id,created_at);
@@ -970,20 +971,49 @@ def _advance_open_validation_trades(con: Any, user_id: int, bar: dict[str, Any],
         _advance_validation_trade(con, dict(row), bar, px)
 
 
+def _market_thesis_id(result: dict[str, Any]) -> str | None:
+    """Stable market-centric ID shared by users seeing the same setup.
+
+    Identity intentionally excludes user/session IDs. It buckets the market
+    timestamp to five minutes and fingerprints strategy, symbol, direction and
+    rounded planned levels so duplicate customer validations can be grouped
+    without changing any execution behavior.
+    """
+    side = str(result.get("signal") or "").upper()
+    if side not in ("LONG", "SHORT"):
+        return None
+    ts = int(result.get("ts") or 0)
+    bucket = ts // 300000 if ts > 0 else 0
+    strategy = str(result.get("strategy") or "scalp").lower()
+    symbol = str(result.get("symbol") or "US30").upper()
+    def level(name: str) -> str:
+        v = result.get(name)
+        try:
+            return f"{float(v):.1f}"
+        except (TypeError, ValueError):
+            return "-"
+    canonical = "|".join([
+        strategy, symbol, side, str(bucket),
+        level("entry_low"), level("entry_high"), level("stop"), level("tp2"),
+    ])
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
+
+
 def _thesis_shadow_event(con: Any, user_id: int, session_id: int | None, result: dict[str, Any], event_type: str, details: dict[str, Any] | None = None) -> None:
     """Persist RC1.1 thesis-lifecycle telemetry without changing live execution."""
+    thesis_id = _market_thesis_id(result)
     con.execute(
         """INSERT INTO thesis_shadow_events(
-               user_id,created_at,session_id,strategy,side,event_type,signal,confidence,weighted_score,price,details_json
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               user_id,created_at,session_id,thesis_id,strategy,side,event_type,signal,confidence,weighted_score,price,details_json
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            user_id, now_iso(), session_id, str(result.get("strategy") or "scalp"),
-            result.get("signal"), event_type, result.get("signal"),
-            int(result.get("confidence") or 0), float(result.get("weighted_score") or 0),
-            float(result.get("price") or 0), json.dumps(details or {}),
+            user_id, now_iso(), session_id, thesis_id,
+            str(result.get("strategy") or "scalp"), result.get("signal"),
+            event_type, result.get("signal"), int(result.get("confidence") or 0),
+            float(result.get("weighted_score") or 0), float(result.get("price") or 0),
+            json.dumps({**(details or {}), "thesis_id": thesis_id}),
         ),
     )
-
 
 def _ensure_continuous_validation_session(con: Any, user_id: int, result: dict[str, Any]) -> dict[str, Any]:
     """Keep autonomous engine validation scanning, independent of manual controls."""
