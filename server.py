@@ -59,6 +59,9 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 RESET_EMAIL_FROM = os.getenv("RESET_EMAIL_FROM", "onboarding@resend.dev").strip()
 PASSWORD_RESET_MINUTES = max(10, int(os.getenv("PASSWORD_RESET_MINUTES", "30")))
 FORGELOGIC_BRIDGE_SECRET = os.getenv("FORGELOGIC_BRIDGE_SECRET", "").strip()
+AUTOTRADER_URL = os.getenv("AUTOTRADER_URL", "").rstrip("/")
+AUTOTRADER_BRIDGE_SECRET = os.getenv("AUTOTRADER_BRIDGE_SECRET", "").strip()
+AUTOTRADER_USER_ID = int(os.getenv("AUTOTRADER_USER_ID", "0") or 0)
 stripe.api_key = STRIPE_SECRET_KEY or None
 
 # Commercial safety invariant: never run a Stripe-enabled deployment with the
@@ -837,6 +840,20 @@ def _notify(con: Any, user_id: int, event_type: str, title: str, body: str, dedu
         _send_web_push(con, user_id, title, body, event_type)
 
 
+def _send_autotrader_entry_ready(user_id: int, side: str, signal_id: str) -> None:
+    """Forward one genuine RC1 ENTRY READY setup to the personal demo executor."""
+    if user_id != AUTOTRADER_USER_ID or not AUTOTRADER_URL or not AUTOTRADER_BRIDGE_SECRET:
+        return
+    url = f"{AUTOTRADER_URL}/broker/ctrader/entry-ready?direction={side}&signal_id={signal_id}"
+    req = urllib.request.Request(url, data=b"", method="POST", headers={"X-Autotrader-Secret": AUTOTRADER_BRIDGE_SECRET, "User-Agent": "US30-Copilot-RC1/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if not 200 <= resp.status < 300:
+                print(f"[AUTOTRADER-BRIDGE] HTTP {resp.status}", flush=True)
+    except Exception as exc:
+        print(f"[AUTOTRADER-BRIDGE-ERROR] {type(exc).__name__}: {exc}", flush=True)
+
+
 def _one_minute_bar(payload: dict[str, Any]) -> dict[str, float] | None:
     for f in payload.get("frames") or []:
         if isinstance(f, dict) and f.get("tf") == "1m":
@@ -1024,6 +1041,7 @@ def _process_copilot(con: Any, user_id: int, payload: dict[str, Any], result: di
             f"Price {px:,.1f} is inside ARMED zone {lo:,.1f}–{hi:,.1f}. Stop {sess['stop']:,.1f} · TP1 {sess['tp1']:,.1f} · TP2 {sess['tp2']:,.1f}",
             f"ready:{sess['id']}:{ts_bucket}"
         )
+        _send_autotrader_entry_ready(user_id, sess["side"], f"rc1-{sess['id']}")
         # Automatic ENGINE validation starts here. Manual live tracking does not.
         _ensure_validation_trade(con, user_id, sess, result, px)
     if sess["status"] != "LIVE":
