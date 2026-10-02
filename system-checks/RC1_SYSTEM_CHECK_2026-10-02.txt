@@ -1,0 +1,38 @@
+ForgeLogic RC1 system check — 2 October 2026
+
+Status: source, infrastructure and outcome-code checks complete. Database row audit remains pending. No production code, variables, infrastructure or deployments changed.
+
+Source of truth loaded
+- ForgeLogic-RC1-Chat-2026-10-02.txt, saved checkpoint.
+- forgelogic-website/main/FORGELOGIC-MASTER-SOURCE-OF-TRUTH.md, current GitHub record.
+- RC1 main commit 8ffc6f9b48ce9d8d9fd338c0e6a85bf051f38adf, deployed September 30 baseline.
+- RC1.1 development commit fd0de818186c7fef5d02269fc6e855318562976e, isolated shadow.
+- RC1, RC1.1, v7.9 and cTrader remain separate systems.
+
+Verified findings
+1. Production: current Railway deployment successful. Logs show PostgreSQL backend and successful minute packets for users 1, 5 and 7. Three deliveries per timestamp are three users, not proof of duplicate feed deliveries. HTTP success and backend selection do not establish database counts or complete historical coverage.
+2. Persistence: production Postgres has an actual volume at /var/lib/postgresql/data; production app also has /data. Legacy SQLite file was reported last modified September 2 and is not the active store. A recoverable PostgreSQL backup has not been verified.
+3. Shadow collection blocker: /internal/shadow/tradingview validates and acknowledges mirrored packets, but does not call analysis or insert market snapshots/thesis events. Existing schema and successful pre-deploy connectivity checks do not establish learning collection. Other event-writing paths exist but are not reached by this receiver.
+4. Shadow persistence blocker: shadow Postgres currently has no attached persistent volume. Current row counts and recoverable backup status must be established before any restart, redeployment or volume change.
+5. Outcome accounting: production advances open validation trades for each incoming packet without checking symbol or market timestamp. Candle storage upserts by user/time, but that does not deduplicate trade advancement. Older or repeated bars can therefore alter outcomes or bars_open. Data gaps do not explicitly mark uncertain outcomes.
+6. Same-bar ambiguity: STOP is conservatively prioritized when stop and TP2 both fall within a bar, but tp1_hit is still recorded. That flag cannot prove TP1 was reached before the stop; do not present it as confirmed TP1-first success.
+
+Offline verification
+The unchanged production _advance_validation_trade function was extracted via AST and executed against an isolated in-memory database, without importing the app or accessing credentials/network:
+- Same bar delivered twice: bars_open increased to 2.
+- Bar timestamp earlier than opened_ts: trade closed STOP, because timestamp is ignored.
+- Bar spanning stop and both targets: STOP with tp1_hit=1.
+These demonstrate code behavior, not the historical incidence or financial impact. Actual data is needed to quantify incidence. No performance rates were inferred.
+
+Pending database audit
+Prepared rc1-read-only-audit.sql: read-only repeatable-read transaction, 30-second statement timeout, aggregate-only results, explicit rollback. It measures row/date coverage, per-user market timestamps, duplicates/out-of-order packets, candle gaps, trade outcome groups and geometry. Shadow counts run separately after table discovery. SQL has not been executed against production. No raw payloads or credentials should be exported into chat or GitHub.
+
+Access limitation
+The connected Railway tools can inspect service configuration and logs but cannot execute SQL. Direct public health requests timed out at this workspace's proxy, so independent HTTP health probes were not verified. Actual counts, September 25–October 2 coverage, feed freshness by database timestamp, independent episodes and recalculated outcomes remain unverified.
+
+Next actions
+1. Obtain read-only production and shadow database results and verify a recoverable backup.
+2. Quantify duplicate/out-of-order/gap incidence and deduplicate cross-user observations into independent market episodes before evaluating learning.
+3. Prepare timestamp/symbol guards and explicit ambiguous/gap outcome labels in an isolated branch, with replay validation against the protected RC1 baseline.
+4. Wire isolated shadow analysis/storage with stable feed identity and safe persistence; validate before treating a new observation period as collected learning.
+5. Keep the restored LONG/SHORT/WAIT production baseline protected. Changes require a concrete reviewed patch and safe deployment plan.
