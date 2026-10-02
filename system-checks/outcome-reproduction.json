@@ -1,0 +1,23 @@
+{
+  "source_commit": "8ffc6f9b48ce9d8d9fd338c0e6a85bf051f38adf",
+  "method": "Extract unchanged production function via AST; execute against isolated in-memory SQLite. No server import, startup, credentials or network.",
+  "results": [
+    {
+      "case": "identical bar delivered twice",
+      "observed_bars_open": 2,
+      "expected_unique_bars": 1
+    },
+    {
+      "case": "bar predates entry",
+      "observed_close_reason": "STOP",
+      "entry_ts": 100000,
+      "bar_ts": 40000
+    },
+    {
+      "case": "same bar spans stop and both targets",
+      "observed_close_reason": "STOP",
+      "observed_tp1_hit": 1,
+      "interpretation": "conservative STOP outcome; TP1 ordering remains unknown"
+    }
+  ]
+}
