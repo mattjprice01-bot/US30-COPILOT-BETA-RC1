@@ -1,0 +1,179 @@
+FORGELOGIC RC1 — CHAT THREAD AND RESUME CHECKPOINT
+Saved: 2 October 2026, Europe/London
+Scope: visible RC1 shadow review context and this repository-check thread. This is not an export of unseen earlier chats.
+
+RESUME POINT
+Read-only repository check completed. No code, trading logic or deployments changed.
+Next action: inspect production and shadow database row counts and date coverage for 25 September–2 October 2026; establish which market packets, results, candles and trades are recoverable before evaluating decisions.
+Do not treat receiver acknowledgements or a successful schema check as proof that shadow evidence was stored.
+
+CONTEXT PROVIDED FROM THE EARLIER CHAT
+User: Load Forge Logic RC1 chat.
+Assistant: Said the original LONG/SHORT/WAIT version was restored on 30 September; RC1 remains separate from v7.9 swing and cTrader Auto Trader.
+User: Requested tests on five days of shadow collection to cross-check correct trades, missed trades and the thinking model.
+Assistant: Reported the shadow receiver acknowledged/logged US30 packets without passing them into the engine or storing analysis records. Reported three deliveries per market timestamp and proposed checking production history for recovery. These live-log observations were supplied context, not independently rechecked in this thread.
+User: Okay, pause chat.
+Assistant: Paused; said no code or trading logic had changed.
+
+THIS THREAD
+User: Can you check the other rc1 repositorys for the data analysis info
+Assistant: I’ll use the personal-context skill to find the other RC1 repositories, then check for shadow records and analysis data.
+Assistant progress: I found that the shadow and development versions are branches of the RC1 repository. I’m checking their recording code and analysis notes; production also has snapshot and trade tables that may provide another source of evidence.
+
+Assistant final:
+Yes, Matt. I checked all four RC1 branches and the ForgeLogic master record.
+- rc1.1-development: Shadow analysis code for false resets, repeated requalification, stable trade identities and YM futures scoring.
+- Production main: Code that saves raw market packets, calculated results, candles, trade outcomes and session history to its database. This is the strongest recovery lead.
+- Shadow/analytics branches: No committed five-day data export or completed analysis report found.
+- ForgeLogic master record: Records an earlier sample of roughly 160 trades, needing deduplication into unique market episodes.
+The shadow receiver fault is confirmed in the development code, but that does not prove production’s data is missing. Actual database row counts and date coverage still need checking before we can confirm what’s recoverable.
+No code, deployments or trading logic changed.
+
+User: Save chat thread
+
+VERIFIED REPOSITORY FINDINGS
+Repository: mattjprice01-bot/US30-COPILOT-BETA-RC1
+Branches checked: main, rc1-analytics-release, rc1-shadow-mirror, rc1.1-development.
+Development files include server.py, scoring.py, thesis_identity.py, shadow_db_check.py, tests/test_rc11_shadow.py and tests/test_rc11_thesis_identity.py.
+The /internal/shadow/tradingview endpoint validates the mirror secret and packet structure, prints symbol/timestamp/frame count, then returns success. It does not call aggregation, process the copilot, or insert a snapshot.
+Development telemetry defines thesis_shadow_events and INVALIDATED, RESETTING and REQUALIFIED events elsewhere in the engine path. Their existence does not prove mirrored packets reached that path.
+shadow_db_check.py checks connectivity and creates/checks the telemetry table; it does not verify event collection.
+Production ingest calls aggregate and _process_copilot, inserts snapshots with raw_json and result_json, and upserts candles_1m. Tables also include trades, notifications and copilot_sessions.
+No committed five-day data export or completed analysis report was found in the RC1 branches/history inspected.
+Actual database contents were not queried.
+
+RAILWAY CONFIGURATION VERIFIED
+Project: Co - pilot 6.4
+Project ID: 2f7962e5-24bb-4d52-997b-5b0d37482288
+Production environment: 5580d4d7-0657-4e5c-a56e-0ec6f38ebead
+Production service: co-pilot-6.4
+Production service ID: f50af3b1-a220-4ad6-89d8-2e5edc6513d3
+Production source branch: main
+Production domain: app.us30copilot.com
+Production has DATABASE_URL configured and a /data volume mount.
+Shadow service: rc1-1-shadow
+Shadow service ID: b731be30-ade6-44a8-b25c-2ee239644484
+Shadow source branch: rc1.1-development
+Shadow domain: rc1-1-shadow-production.up.railway.app
+Shadow has DATABASE_URL configured; pre-deploy command is python shadow_db_check.py.
+Database services listed: Postgres and rc1-1-shadow-postgres.
+No credential values are included in this archive.
+
+MASTER RECORD
+https://github.com/mattjprice01-bot/forgelogic-website/blob/main/FORGELOGIC-MASTER-SOURCE-OF-TRUTH.md
+The current file was read in this thread. It records a Friday 2 October review covering thesis continuity, false resets, missed moves, readiness timing and unique episodes. It refers to roughly 160 earlier recorded trades requiring deduplication, but does not contain that dataset.
+The master record describes intended collection; this thread’s source inspection establishes that the mirror receiver does not implement that collection path.
+An attempted README.md fetch from forgelogic-beta-api returned 404; that repository was not fully audited here.
+
+NEXT DATA CHECK
+1. Read-only counts and minimum/maximum timestamps for production snapshots, candles_1m, trades and copilot_sessions.
+2. Read-only counts and timestamp coverage for shadow thesis_shadow_events and any snapshots/trades.
+3. Determine unique market timestamps and user/feed identity before counting opportunities.
+4. Recover available production inputs/results and outcomes; distinguish historical recorded decisions from any later replay.
+5. Deduplicate into unique market episodes and evaluate resets, re-arms, rejected entries, missed moves and outcomes.
+6. Keep actual evidence distinct from intended behaviour and prior assistant claims.
+
+
+======================================================================
+RC1 FOLLOW-UP CHAT CHECKPOINT — 2 OCTOBER 2026, 12:45 BST
+This section supersedes the earlier resume point. Earlier content is retained as history.
+This is a factual chat checkpoint, not a verbatim export of unseen messages.
+
+CURRENT RESUME POINT
+- Repository, infrastructure and isolated outcome-code checks are complete.
+- Actual production and shadow PostgreSQL row counts, date coverage and backup recoverability are still UNVERIFIED.
+- User approved Railway browser fallback for READ-ONLY database checks.
+- Browser reached Google sign-in for Railway; email step completed securely, followed by passkey verification.
+- Manual browser handoff was requested. User has not yet said verification is complete; sign-in success is not established.
+- Latest user instruction: "Save chat".
+- Next action after user confirms authentication: inspect a fresh Railway page, verify signed-in access, then inspect production and shadow database contents/backup status without writes or deployments.
+- A browser handoff is session-bound; do not store or reconstruct authentication URLs, codes, passwords or tokens.
+
+REQUESTS AND RESPONSES IN THIS FOLLOW-UP
+User: "Perfect can we carry out the same system checks on rc1 application maybe load rc1 chat from source of truth so you know where we are"
+Assistant loaded this saved RC1 chat and the ForgeLogic GitHub master record, inspected RC1 sources and Railway configuration, and performed isolated outcome-code checks.
+Assistant reported:
+  Production is receiving packets and uses PostgreSQL with persistent storage.
+  Shadow acknowledges mirrored packets but does not process/save them.
+  Shadow PostgreSQL lacks an attached persistent volume.
+  Repeated/older bars can incorrectly advance validation trades.
+  Actual collected-data counts and coverage remain pending.
+Assistant asked to use Railway browser console because connected Railway tools cannot execute SQL.
+User: "Yes continue"
+Assistant opened Railway; browser required independent sign-in. Secure Google sign-in advanced to passkey verification.
+Assistant requested manual browser handoff and said:
+  "Google is waiting for your passkey verification to finish Railway sign-in. Complete it in the browser shown here, then tell me 'done.' The database checks are still pending. RC1 remains unchanged."
+User: "Save chat"
+
+VERIFIED FOLLOW-UP FINDINGS
+Production source:
+  Repository mattjprice01-bot/US30-COPILOT-BETA-RC1
+  main commit 8ffc6f9b48ce9d8d9fd338c0e6a85bf051f38adf
+  Current successful deployment from September 30:
+  7707a49d-d34c-4462-b80c-047497bf7ab5
+  Restored LONG/SHORT/WAIT baseline remains protected.
+
+Shadow source:
+  rc1.1-development commit fd0de818186c7fef5d02269fc6e855318562976e
+  Current successful deployment from September 25:
+  29eea160-6f07-4fae-b9e8-1fe0ab4ea8a7
+
+Infrastructure:
+  Production app has actual /data volume.
+  Production Postgres service a1ce4f39-9b5f-43fd-992c-009205354825
+  Actual PostgreSQL volume ff863fbe-7bf0-4948-a5b2-46b44bedd273
+  Mount /var/lib/postgresql/data.
+  Shadow Postgres service 46b7daf3-94a8-47b1-bc7c-34c06e74b305
+  No attached volume in current service configuration.
+  Verify existing rows and recoverable backup BEFORE restarting, redeploying or changing shadow database storage.
+  No recoverable PostgreSQL backup has yet been verified.
+
+Feeds:
+  Logs showed minute packets for users 1, 5 and 7, with HTTP success and PostgreSQL backend selection.
+  Three packets at one timestamp are three user feeds; do not call them same-user duplicates.
+  HTTP acknowledgement does not establish complete persisted history.
+  Production/shadow public health probes from workspace timed out at proxy; independent HTTP probe remains unverified.
+
+Outcome-code checks:
+  _advance_open_validation_trades advances open trades for a user without symbol/timestamp guard.
+  Candle upsert by user/time does not deduplicate trade advancement.
+  Timestamp/out-of-order and gap validity labels need consideration before trusting performance.
+  Same-bar stop/TP2 is conservatively STOP, but tp1_hit is still set; it cannot prove TP1 occurred before stop.
+  Extracted unchanged _advance_validation_trade via AST and ran against isolated in-memory SQLite.
+  No app startup, credentials, network or production writes:
+    Repeated identical bar => bars_open increased to 2.
+    Older-than-entry bar => STOP closure because timestamp is ignored.
+    Bar spanning stop and both targets => STOP with tp1_hit=1.
+  These prove code behaviour, not historical incidence or financial impact.
+
+PRESERVED AUDIT ARTIFACTS
+GitHub branch: rc1-system-check-2026-10-02
+Latest audit commit before this chat-save: 94f3428853c31cb8553d4c9707c5617ef63bc093
+Files:
+  system-checks/RC1_SYSTEM_CHECK_2026-10-02.txt
+  system-checks/rc1-read-only-audit.sql
+  system-checks/outcome-reproduction.json
+URL:
+https://github.com/mattjprice01-bot/US30-COPILOT-BETA-RC1/tree/rc1-system-check-2026-10-02/system-checks
+
+Prepared SQL uses a read-only repeatable-read transaction, aggregate-only output,
+30-second statement timeout and explicit rollback. Production and shadow queries run separately.
+SQL has NOT been executed against live databases.
+
+No production code, trading logic, configuration, infrastructure or deployments were changed.
+Documentation was saved on a separate branch. No credentials/raw database exports were committed.
+
+BOUNDARIES / NEXT WORK
+Keep RC1 production, RC1.1 shadow, v7.9 swing and cTrader Auto Trader separate.
+Do not infer a five-day shadow learning dataset from logs or schema readiness.
+Do not tune or report win rates before verified data and independent market episodes.
+After database inspection: deduplicate observations per feed and across users, quantify repeated/out-of-order bars, gaps and ambiguity, and evaluate entry decisions/missed moves against actual evidence.
+Prepare any proposed repairs in isolation, preserving the current production baseline and establishing backups before deployments.
+
+SEPARATE V7.9 CONTEXT FROM THIS THREAD
+v7.9 earlier fixes and review are separate from RC1.
+A v7.9 review was scheduled for October 7.
+Its saved GitHub record is branch v7.9-chat in mattjprice01-bot/v7-8.2:
+  V7_9_CHAT_SOURCE_OF_TRUTH.md
+  chat-archive/V7_9_CHAT_2026-10-02.md
+Do not use v7.9 database state as RC1 evidence.
