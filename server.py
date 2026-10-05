@@ -1077,6 +1077,14 @@ def _ensure_continuous_validation_session(con: Any, user_id: int, result: dict[s
                 (now, now, sess["id"]),
             )
             sess = None
+        elif not tracked:
+            reason = _untraded_plan_invalidation(sess, result)
+            if reason:
+                con.execute(
+                    "UPDATE copilot_sessions SET status='CLOSED',updated_at=?,closed_at=?,close_reason=? WHERE id=?",
+                    (now, now, reason, sess["id"]),
+                )
+                sess = None
 
     # IDLE is retained for database compatibility but can no longer turn off
     # learning. The next market packet automatically returns to scanning.
@@ -1095,6 +1103,29 @@ def _ensure_continuous_validation_session(con: Any, user_id: int, result: dict[s
         new_id = int(cur.fetchone()["id"])
         sess = dict(con.execute("SELECT * FROM copilot_sessions WHERE id=?", (new_id,)).fetchone())
     return sess
+
+
+def _untraded_plan_invalidation(sess: dict, result: dict) -> str | None:
+    """Retire an unexecuted plan, not a manual or broker position."""
+    side=sess.get("side")
+    direction=result.get("signal")
+    price=float(result.get("price") or 0)
+    stop=float(sess.get("stop") or 0)
+    target=float(sess.get("tp2") or 0)
+    if side not in ("LONG","SHORT") or min(price,stop,target)<=0:
+        return "INVALID_PLAN"
+    if direction in ("LONG","SHORT") and direction!=side:
+        return "DIRECTION_CHANGED"
+    if (price<=stop if side=="LONG" else price>=stop):
+        return "UNTRADED_STOP_PASSED"
+    if (price>=target if side=="LONG" else price<=target):
+        return "UNTRADED_TARGET_PASSED"
+    horizon={"scalp":3600,"intraday":28800}.get(sess.get("strategy"))
+    if horizon and sess.get("updated_at"):
+        armed=datetime.fromisoformat(sess["updated_at"].replace("Z","+00:00"))
+        if (datetime.now(timezone.utc)-armed).total_seconds()>horizon:
+            return "UNTRADED_HORIZON_EXPIRED"
+    return None
 
 
 
