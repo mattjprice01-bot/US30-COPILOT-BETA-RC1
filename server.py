@@ -840,6 +840,16 @@ def _notify(con: Any, user_id: int, event_type: str, title: str, body: str, dedu
         _send_web_push(con, user_id, title, body, event_type)
 
 
+def _one_minute_bar(payload: dict[str, Any]) -> dict[str, float] | None:
+    for f in payload.get("frames") or []:
+        if isinstance(f, dict) and f.get("tf") == "1m":
+            try:
+                return {k: float(f[k]) for k in ("o", "h", "l", "c")}
+            except Exception:
+                return None
+    return None
+
+
 def _rc1_demo_plan(sess: dict, result: dict, received_at: str) -> dict | None:
     """Export the same immutable ARMED geometry RC1 uses for entry readiness."""
     received = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
@@ -902,6 +912,9 @@ def autotrader_setup(request: Request):
         return {"user_id":AUTOTRADER_USER_ID,"manual_approval_required":False,"destination":AUTOTRADER_URL,
                 "feed_received_at":snapshot["received_at"] if snapshot else None,
                 "session_status":sess.get("status") if sess else None,
+                "session_id":sess.get("id") if sess else None,
+                "session_updated_at":sess.get("updated_at") if sess else None,
+                "engine_price":result.get("price"),
                 "direction":result.get("signal"),"assessment":_entry_assessment(result,sess) if result else None,
                 "setup":setup,"build":"2026-10-05-dynamic-demo-bridge"}
 
@@ -2184,4 +2197,3 @@ self.addEventListener('notificationclick',e=>{e.notification.close();const url=e
 def icon():
     svg='''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><radialGradient id="g"><stop offset="0" stop-color="#1cc3ff"/><stop offset="1" stop-color="#07111f"/></radialGradient></defs><rect width="512" height="512" rx="110" fill="#030811"/><circle cx="256" cy="240" r="170" fill="url(#g)" opacity=".35"/><path d="M368 145c-30-31-69-48-112-48-88 0-159 70-159 157s71 157 159 157c46 0 87-19 116-52" fill="none" stroke="#e8f2fb" stroke-width="49" stroke-linecap="round"/><circle cx="256" cy="241" r="28" fill="#18a8ff"/><path d="M256 241l94-68" stroke="#18a8ff" stroke-width="11" stroke-linecap="round"/></svg>'''
     return Response(content=svg,media_type="image/svg+xml")
-
