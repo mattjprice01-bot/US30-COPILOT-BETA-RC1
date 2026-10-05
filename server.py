@@ -840,28 +840,96 @@ def _notify(con: Any, user_id: int, event_type: str, title: str, body: str, dedu
         _send_web_push(con, user_id, title, body, event_type)
 
 
-def _send_autotrader_entry_ready(user_id: int, side: str, signal_id: str) -> None:
-    """Forward one genuine RC1 ENTRY READY setup to the personal demo executor."""
+def _rc1_demo_plan(sess: dict, result: dict, received_at: str) -> dict | None:
+    """Export the same immutable ARMED geometry RC1 uses for entry readiness."""
+    received = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+    age = (datetime.now(timezone.utc)-received).total_seconds()
+    if not 0 <= age <= 90 or not sess or sess.get("status") != "ARMED":
+        return None
+    assessment = _entry_assessment(result, sess)
+    if (result.get("signal") != sess.get("side") or assessment["quality"] != "READY"
+            or not assessment["inside_entry"]):
+        return None
+    # The TradingView candle itself must also be current, not just its delivery.
+    candle_ms = int(result.get("ts") or 0)
+    if not -1000 <= time.time()*1000-candle_ms <= 180000:
+        return None
+    return {
+        "signal_id": f"rc1-{sess['id']}", "source": "FORGELOGIC_RC1", "state": "ENTRY_READY",
+        "direction": sess["side"], "entry_low": sess["planned_entry_low"],
+        "entry_high": sess["planned_entry_high"], "stop_price": sess["stop"],
+        "tp1": sess["tp1"], "tp2": sess["tp2"],
+        "expires_at_ms": int((received+timedelta(seconds=90)).timestamp()*1000),
+    }
+
+
+def _send_autotrader_entry_ready(user_id: int, sess: dict, result: dict) -> None:
     if user_id != AUTOTRADER_USER_ID or not AUTOTRADER_URL or not AUTOTRADER_BRIDGE_SECRET:
         return
-    url = f"{AUTOTRADER_URL}/broker/ctrader/entry-ready?direction={side}&signal_id={signal_id}"
-    req = urllib.request.Request(url, data=b"", method="POST", headers={"X-Autotrader-Secret": AUTOTRADER_BRIDGE_SECRET, "User-Agent": "US30-Copilot-RC1/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if not 200 <= resp.status < 300:
-                print(f"[AUTOTRADER-BRIDGE] HTTP {resp.status}", flush=True)
-    except Exception as exc:
-        print(f"[AUTOTRADER-BRIDGE-ERROR] {type(exc).__name__}: {exc}", flush=True)
+    payload = _rc1_demo_plan(sess, result, now_iso())
+    if not payload:
+        return
+    def deliver():
+        req = urllib.request.Request(AUTOTRADER_URL+"/broker/ctrader/entry-ready",
+            data=json.dumps(payload).encode(), method="POST",
+            headers={"X-Autotrader-Secret":AUTOTRADER_BRIDGE_SECRET,"Content-Type":"application/json"})
+        try:
+            with urllib.request.urlopen(req,timeout=5) as resp:
+                status=json.load(resp)
+            print("[AUTOTRADER-BRIDGE]",payload["signal_id"],status.get("status"),flush=True)
+        except Exception as exc:
+            print(f"[AUTOTRADER-BRIDGE-ERROR] {type(exc).__name__}: {exc}",flush=True)
+    threading.Thread(target=deliver,name="autotrader-bridge",daemon=True).start()
 
 
-def _one_minute_bar(payload: dict[str, Any]) -> dict[str, float] | None:
-    for f in payload.get("frames") or []:
-        if isinstance(f, dict) and f.get("tf") == "1m":
-            try:
-                return {k: float(f[k]) for k in ("o", "h", "l", "c")}
-            except Exception:
-                return None
-    return None
+def _authenticate_autotrader(request: Request):
+    supplied=request.headers.get("x-autotrader-secret", "")
+    if not AUTOTRADER_BRIDGE_SECRET or not supplied or not hmac.compare_digest(supplied,AUTOTRADER_BRIDGE_SECRET):
+        raise HTTPException(401,"unauthorized_autotrader")
+
+
+@app.get("/api/autotrader/setup")
+def autotrader_setup(request: Request):
+    _authenticate_autotrader(request)
+    with db() as con:
+        user=con.execute("SELECT id,is_active FROM users WHERE id=?",(AUTOTRADER_USER_ID,)).fetchone()
+        if not user or not user["is_active"]:
+            raise HTTPException(503,"autotrader_user_not_configured_or_inactive")
+        snapshot=con.execute("SELECT received_at,result_json FROM snapshots WHERE user_id=? ORDER BY id DESC LIMIT 1",(AUTOTRADER_USER_ID,)).fetchone()
+        sess=_active_copilot(AUTOTRADER_USER_ID,con)
+        result=json.loads(snapshot["result_json"]) if snapshot else {}
+        setup=_rc1_demo_plan(sess,result,snapshot["received_at"]) if snapshot else None
+        return {"user_id":AUTOTRADER_USER_ID,"manual_approval_required":False,"destination":AUTOTRADER_URL,
+                "feed_received_at":snapshot["received_at"] if snapshot else None,
+                "session_status":sess.get("status") if sess else None,
+                "direction":result.get("signal"),"assessment":_entry_assessment(result,sess) if result else None,
+                "setup":setup,"build":"2026-10-05-dynamic-demo-bridge"}
+
+
+@app.post("/api/autotrader/event")
+def autotrader_event(request: Request, payload: dict):
+    _authenticate_autotrader(request)
+    sid=str(payload.get("signal_id", ""))
+    if not re.fullmatch(r"rc1-[0-9]+",sid):
+        raise HTTPException(422,"invalid_signal_id")
+    with db() as con:
+        session=con.execute("SELECT user_id FROM copilot_sessions WHERE id=?",(int(sid[4:]),)).fetchone()
+        if not session or int(session["user_id"])!=AUTOTRADER_USER_ID:
+            raise HTTPException(403,"signal_account_mismatch")
+        status=str(payload.get("status", ""))
+        titles={"filled":"Demo trade executed","filled_reconciled":"Demo trade confirmed by reconciliation",
+                "partial_profit":"Demo take profit confirmed","closed":"Demo trade closed",
+                "closed_reconciled":"Demo position closure reconciled","rejected":"Demo order rejected",
+                "protection_failed":"Demo stop/target update rejected"}
+        if status not in titles:
+            raise HTTPException(422,"unsupported_execution_event")
+        details=[sid,status]
+        for key in ("position_id","direction","price","volume","stop_price","take_profit","error_code"):
+            if payload.get(key) is not None: details.append(f"{key}: {payload[key]}")
+        dedupe=f"demo:{sid}:{status}:{payload.get('order_id', '')}:{payload.get('volume', '')}"
+        _notify(con,AUTOTRADER_USER_ID,"DEMO_EXECUTION",titles[status]," · ".join(details),dedupe)
+        con.commit()
+    return {"ok":True}
 
 
 def _entry_assessment(result: dict[str, Any], sess: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1030,7 +1098,7 @@ def _process_copilot(con: Any, user_id: int, payload: dict[str, Any], result: di
     ts_bucket = int(result.get("ts") or 0) // 60000
     if sess["status"] == "LOOKING" and assess["quality"] in ("READY", "NEAR") and result.get("signal") in ("LONG", "SHORT"):
         _notify(con, user_id, "SETUP", f"{cfg.label} opportunity detected", f"{result['signal']} · readiness {assess['score']}/100 · engine score {result['confidence']}%", f"setup:{sess['id']}:{result['signal']}:{int(result['confidence'])//5}")
-        if _settings(user_id, con).get("auto_arm", True) and assess["score"] >= 72:
+        if (user_id == AUTOTRADER_USER_ID or _settings(user_id, con).get("auto_arm", True)) and assess["score"] >= 72:
             con.execute("""UPDATE copilot_sessions SET status='ARMED',updated_at=?,strategy=?,symbol=?,side=?,planned_entry_low=?,planned_entry_high=?,stop=?,tp1=?,tp2=?,setup_confidence=?,setup_score=? WHERE id=?""",
                         (now_iso(), cfg.name, result.get("symbol"), result.get("signal"), result.get("entry_low"), result.get("entry_high"), result.get("stop"), result.get("tp1"), result.get("tp2"), result.get("confidence"), result.get("weighted_score"), sess["id"]))
             sess = dict(con.execute("SELECT * FROM copilot_sessions WHERE id=?", (sess["id"],)).fetchone())
@@ -1041,7 +1109,7 @@ def _process_copilot(con: Any, user_id: int, payload: dict[str, Any], result: di
             f"Price {px:,.1f} is inside ARMED zone {lo:,.1f}–{hi:,.1f}. Stop {sess['stop']:,.1f} · TP1 {sess['tp1']:,.1f} · TP2 {sess['tp2']:,.1f}",
             f"ready:{sess['id']}:{ts_bucket}"
         )
-        _send_autotrader_entry_ready(user_id, sess["side"], f"rc1-{sess['id']}")
+        _send_autotrader_entry_ready(user_id, sess, result)
         # Automatic ENGINE validation starts here. Manual live tracking does not.
         _ensure_validation_trade(con, user_id, sess, result, px)
     if sess["status"] != "LIVE":
@@ -2116,3 +2184,4 @@ self.addEventListener('notificationclick',e=>{e.notification.close();const url=e
 def icon():
     svg='''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><radialGradient id="g"><stop offset="0" stop-color="#1cc3ff"/><stop offset="1" stop-color="#07111f"/></radialGradient></defs><rect width="512" height="512" rx="110" fill="#030811"/><circle cx="256" cy="240" r="170" fill="url(#g)" opacity=".35"/><path d="M368 145c-30-31-69-48-112-48-88 0-159 70-159 157s71 157 159 157c46 0 87-19 116-52" fill="none" stroke="#e8f2fb" stroke-width="49" stroke-linecap="round"/><circle cx="256" cy="241" r="28" fill="#18a8ff"/><path d="M256 241l94-68" stroke="#18a8ff" stroke-width="11" stroke-linecap="round"/></svg>'''
     return Response(content=svg,media_type="image/svg+xml")
+
