@@ -931,13 +931,13 @@ def autotrader_event(request: Request, payload: dict):
             raise HTTPException(403,"signal_account_mismatch")
         status=str(payload.get("status", ""))
         titles={"filled":"Demo trade executed","filled_reconciled":"Demo trade confirmed by reconciliation",
-                "partial_profit":"Demo take profit confirmed","closed":"Demo trade closed",
+                "partial_profit":"Demo closing fill confirmed","closing_fill":"Demo closing fill confirmed","closed":"Demo trade closed",
                 "closed_reconciled":"Demo position closure reconciled","rejected":"Demo order rejected",
                 "protection_failed":"Demo stop/target update rejected"}
         if status not in titles:
             raise HTTPException(422,"unsupported_execution_event")
         details=[sid,status]
-        for key in ("position_id","direction","price","volume","stop_price","take_profit","error_code"):
+        for key in ("position_id","direction","price","volume","stop_price","take_profit","error_code","deal_id","deal_price","deal_volume","remaining_volume"):
             if payload.get(key) is not None: details.append(f"{key}: {payload[key]}")
         dedupe=f"demo:{sid}:{status}:{payload.get('order_id', '')}:{payload.get('volume', '')}"
         _notify(con,AUTOTRADER_USER_ID,"DEMO_EXECUTION",titles[status]," · ".join(details),dedupe)
@@ -2228,3 +2228,4 @@ self.addEventListener('notificationclick',e=>{e.notification.close();const url=e
 def icon():
     svg='''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><radialGradient id="g"><stop offset="0" stop-color="#1cc3ff"/><stop offset="1" stop-color="#07111f"/></radialGradient></defs><rect width="512" height="512" rx="110" fill="#030811"/><circle cx="256" cy="240" r="170" fill="url(#g)" opacity=".35"/><path d="M368 145c-30-31-69-48-112-48-88 0-159 70-159 157s71 157 159 157c46 0 87-19 116-52" fill="none" stroke="#e8f2fb" stroke-width="49" stroke-linecap="round"/><circle cx="256" cy="241" r="28" fill="#18a8ff"/><path d="M256 241l94-68" stroke="#18a8ff" stroke-width="11" stroke-linecap="round"/></svg>'''
     return Response(content=svg,media_type="image/svg+xml")
+
