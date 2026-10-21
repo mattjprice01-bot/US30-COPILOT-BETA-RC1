@@ -173,6 +173,84 @@ def score_frame(f: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ym_futures_shadow(payload: dict[str, Any], cfg: StrategyConfig) -> dict[str, Any]:
+    """Score TradingView CME YM multi-timeframe frames in shadow mode only.
+
+    RC1.1 records this score for forward validation. It is deliberately excluded
+    from the live signal calculation until enough forward evidence exists.
+    """
+    futures = payload.get("futures")
+    if not isinstance(futures, dict):
+        return {"available": False, "shadow": True, "score": 0.0, "weighted": 0.0,
+                "symbol": None, "frames": [], "reason": "futures payload unavailable"}
+
+    frames = futures.get("frames")
+    if not isinstance(frames, list):
+        frames = []
+
+    by_tf: dict[str, dict[str, Any]] = {}
+    scored_frames: list[dict[str, Any]] = []
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        tf = str(frame.get("tf", ""))
+        if not tf:
+            continue
+
+        close = _f(frame.get("c"))
+        ema20 = _f(frame.get("ema20"), close)
+        ema50 = _f(frame.get("ema50"), close)
+        rsi = _f(frame.get("rsi"), 50.0)
+        atr = max(_f(frame.get("atr"), 1.0), 1e-9)
+        c3 = _f(frame.get("c3"), close)
+        vol = max(_f(frame.get("vol")), 0.0)
+        vma20 = max(_f(frame.get("vma20")), 0.0)
+
+        raw = 0.0
+        reasons: list[str] = []
+        if close > ema20 > ema50:
+            raw += 1.0; reasons.append("bullish EMA structure")
+        elif close < ema20 < ema50:
+            raw -= 1.0; reasons.append("bearish EMA structure")
+        if rsi >= 55:
+            raw += 0.45; reasons.append("RSI bullish")
+        elif rsi <= 45:
+            raw -= 0.45; reasons.append("RSI bearish")
+
+        momentum = _clip((close - c3) / atr, -1.0, 1.0)
+        raw += 0.55 * momentum
+        if abs(momentum) >= 0.35:
+            reasons.append("positive momentum" if momentum > 0 else "negative momentum")
+
+        rvol = (vol / vma20) if vma20 > 0 and vol > 0 else None
+        if rvol is not None and rvol >= 1.25:
+            raw *= 1.10
+            reasons.append("volume expansion")
+
+        score = _clip(raw, -2.0, 2.0)
+        item = {"tf": tf, "score": round(score, 3), "rsi": round(rsi, 2),
+                "momentum": round(momentum, 3),
+                "rvol": round(rvol, 3) if rvol is not None else None,
+                "reasons": reasons}
+        by_tf[tf] = item
+        scored_frames.append(item)
+
+    weighted_sum = 0.0
+    active_weight = 0.0
+    for tf, weight in cfg.weights.items():
+        item = by_tf.get(tf)
+        if item is None:
+            continue
+        weighted_sum += _f(item.get("score")) * weight
+        active_weight += weight
+
+    score = _clip(weighted_sum / active_weight if active_weight else 0.0, -2.0, 2.0)
+    return {"available": bool(active_weight), "shadow": True,
+            "score": round(score, 3), "weighted": round(score * cfg.ym_weight, 3),
+            "symbol": futures.get("symbol"), "frames": scored_frames,
+            "reason": "shadow only; excluded from live signal calculation"}
+
+
 def _ym_context(payload: dict[str, Any], cfg: StrategyConfig) -> dict[str, Any]:
     ym = payload.get("ym")
     if not isinstance(ym, dict):
@@ -259,9 +337,11 @@ def aggregate(
     technical_score = weighted / active_weight if active_weight else 0.0
 
     ym = _ym_context(payload, cfg)
+    ym_futures_shadow = _ym_futures_shadow(payload, cfg)
     orderflow = _orderflow_context(orderflow_ctx, cfg)
 
-    # Confirmation sources are intentionally additive and bounded; technical structure remains primary.
+    # RC1.1 safety invariant: the multi-timeframe YM futures score is shadow
+    # telemetry only. Live RC1 signal calculations remain unchanged.
     combined = technical_score + _f(ym.get("weighted")) + _f(orderflow.get("weighted"))
 
     news = news_ctx if isinstance(news_ctx, dict) else {}
@@ -334,6 +414,7 @@ def aggregate(
         "news_block": news_block,
         "news": news,
         "ym": ym,
+        "ym_futures_shadow": ym_futures_shadow,
         "orderflow": orderflow,
         "price": price,
         "entry_low": entry_low,
